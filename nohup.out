@@ -1,0 +1,42 @@
+[23:40:46] INFO     Loaded configuration from .env                  config.py:50
+Starting PumpFun Bot in PAPER mode
+Tracking 2 wallets
+Maximum SOL per trade: 0.1
+           INFO     Connected to QuickNode WebSocket       wallet_tracker.py:112
+           INFO     Subscribed to program events with ID:  wallet_tracker.py:135
+                    145137                                                      
+           INFO     Started tracking wallets:               wallet_tracker.py:67
+                    D5iFksrTnacbWFFPZX3esEGvxJApGe5RQydWUKY                     
+                    7pFzd,                                                      
+                    JD25qVdtd65FoiXNmR89JjmoJdYk9sjYQeSTZAA                     
+                    LFiMy                                                       
+Starting wallet tracker... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Bot started successfully! Press Ctrl+C to stop.
+[23:40:56] INFO     Loaded configuration from .env                  config.py:50
+Starting PumpFun Bot in PAPER mode
+Tracking 2 wallets
+Maximum SOL per trade: 0.1
+[23:40:57] INFO     Connected to QuickNode WebSocket       wallet_tracker.py:112
+           INFO     Subscribed to program events with ID:  wallet_tracker.py:135
+                    226151                                                      
+           INFO     Started tracking wallets:               wallet_tracker.py:67
+                    JD25qVdtd65FoiXNmR89JjmoJdYk9sjYQeSTZAA                     
+                    LFiMy,                                                      
+                    D5iFksrTnacbWFFPZX3esEGvxJApGe5RQydWUKY                     
+                    7pFzd                                                       
+Starting wallet tracker... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Bot started successfully! Press Ctrl+C to stop.
+[23:41:14] INFO     Loaded configuration from .env                  config.py:50
+Starting PumpFun Bot in PAPER mode
+Tracking 2 wallets
+Maximum SOL per trade: 0.1
+[23:41:15] INFO     Connected to QuickNode WebSocket       wallet_tracker.py:112
+           INFO     Subscribed to program events with ID:  wallet_tracker.py:135
+                    145137                                                      
+           INFO     Started tracking wallets:               wallet_tracker.py:67
+                    D5iFksrTnacbWFFPZX3esEGvxJApGe5RQydWUKY                     
+                    7pFzd,                                                      
+                    JD25qVdtd65FoiXNmR89JjmoJdYk9sjYQeSTZAA                     
+                    LFiMy                                                       
+Starting wallet tracker... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+Bot started successfully! Press Ctrl+C to stop.
