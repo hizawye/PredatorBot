@@ -2,20 +2,22 @@
 Web server for PumpFun Bot - Provides a simple dashboard and API endpoints
 """
 
+from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
 import json
 import logging
 import multiprocessing
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Optional
-
-from flask import Flask, jsonify, render_template, request, send_from_directory
-from flask_cors import CORS
 
 from ..data.trade_store import TradeStore
 from ..utils.config import Config
 from ..utils.constants import WEB_API_PREFIX
 from ..core.wallet_tracker import WalletTracker
+from ..utils.process_manager import ProcessManager
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ CORS(app)
 trade_store: Optional[TradeStore] = None
 config: Optional[Config] = None
 wallet_tracker = None
+process_manager = None
 
 
 @app.route("/")
@@ -119,7 +122,7 @@ def api_tokens():
 @app.route(f"{WEB_API_PREFIX}/wallets/add", methods=["POST"])
 def api_add_wallet():
     """API endpoint to add a tracked wallet"""
-    global wallet_tracker # Need to access the global wallet_tracker instance
+    global wallet_tracker  # Need to access the global wallet_tracker instance
 
     if not wallet_tracker:
         return jsonify({"error": "Wallet tracker not initialized"}), 500
@@ -133,11 +136,16 @@ def api_add_wallet():
 
         # Basic validation (can add more robust validation here)
         if len(wallet_address) != 44 or not wallet_address.isalnum():
-             return jsonify({"error": "Invalid wallet address format."}), 400
+            return jsonify({"error": "Invalid wallet address format."}), 400
 
         wallet_tracker.add_wallet(wallet_address)
 
-        return jsonify({"status": "success", "message": f"Added wallet: {wallet_address}"}), 200
+        return (
+            jsonify(
+                {"status": "success", "message": f"Added wallet: {wallet_address}"}
+            ),
+            200,
+        )
     except Exception as e:
         logger.error(f"Error adding wallet via API: {e}")
         return jsonify({"error": str(e)}), 500
@@ -152,27 +160,99 @@ def api_tracked_wallets():
     try:
         # Load tracked wallets from file (same as WalletTracker)
         import os, json
-        tracked_wallets_file = os.path.join(config.database_path, "tracked_wallets.json")
+
+        tracked_wallets_file = os.path.join(
+            config.database_path, "tracked_wallets.json"
+        )
         tracked_wallets = []
         if os.path.exists(tracked_wallets_file):
             with open(tracked_wallets_file, "r") as f:
                 tracked_wallets = json.load(f)
 
         # You can add more status info here if needed
-        return jsonify({
-            "tracked_wallets": tracked_wallets,
-            "tracking_count": len(tracked_wallets),
-            # Optionally add more status info here
-        })
+        return jsonify(
+            {
+                "tracked_wallets": tracked_wallets,
+                "tracking_count": len(tracked_wallets),
+                # Optionally add more status info here
+            }
+        )
     except Exception as e:
         logger.error(f"Error getting tracked wallets: {e}")
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/status")
+def get_status():
+    cli_status = process_manager.get_process_status("bot_cli")
+    web_status = process_manager.get_process_status("bot_web")
+    wallets = wallet_tracker.get_tracked_wallets()
+
+    return jsonify(
+        {
+            "bot_status": cli_status,
+            "web_status": web_status,
+            "trading_mode": config.trading_mode,
+            "wallet_count": len(wallets),
+            "max_sol_per_trade": config.max_sol_per_trade,
+        }
+    )
+
+
+@app.route("/api/trades")
+def get_trades():
+    limit = request.args.get("limit", 50, type=int)
+    wallet = request.args.get("wallet")
+    token = request.args.get("token")
+
+    wallet_trades = trade_store.get_wallet_trades(wallet_address=wallet, limit=limit)
+    bot_trades = trade_store.get_bot_trades(token_address=token, limit=limit)
+
+    return jsonify({"wallet_trades": wallet_trades, "bot_trades": bot_trades})
+
+
+@app.route("/api/pnl")
+def get_pnl():
+    pnl_stats = trade_store.calculate_pnl()
+    token_stats = trade_store.get_token_stats()
+
+    return jsonify({"pnl_stats": pnl_stats, "token_stats": token_stats})
+
+
+@app.route("/api/wallets", methods=["GET"])
+def get_wallets():
+    wallets = wallet_tracker.get_tracked_wallets()
+    return jsonify(wallets)
+
+
+@app.route("/api/wallets", methods=["POST"])
+def add_wallet():
+    data = request.get_json()
+    wallet_address = data.get("wallet_address")
+
+    if not wallet_address:
+        return jsonify({"error": "Wallet address is required"}), 400
+
+    try:
+        wallet_tracker.add_wallet(wallet_address)
+        return jsonify({"message": "Wallet added successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/wallets/<wallet_address>", methods=["DELETE"])
+def remove_wallet(wallet_address):
+    try:
+        wallet_tracker.remove_wallet(wallet_address)
+        return jsonify({"message": "Wallet removed successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
 def web_server_process(host: str, port: int, config_dict: Dict, trade_store_path: str):
     """Function to run in a separate process for the web server"""
     try:
-        global config, trade_store, wallet_tracker
+        global config, trade_store, wallet_tracker, process_manager
 
         # Recreate config from dict
         config = Config(**config_dict)
@@ -182,6 +262,9 @@ def web_server_process(host: str, port: int, config_dict: Dict, trade_store_path
 
         # Initialize wallet tracker in the web process
         wallet_tracker = WalletTracker(config)
+
+        # Initialize process manager
+        process_manager = ProcessManager(config.database_path)
 
         # Start the web server
         app.run(host=host, port=port, debug=False)

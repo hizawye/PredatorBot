@@ -26,6 +26,7 @@ from .utils.constants import (
     CLI_DESC_START, CLI_DESC_STOP, CLI_DESC_STATUS, CLI_DESC_WEB
 )
 from .web.server import start_web_server
+from .utils.process_manager import ProcessManager
 
 # Set up rich console
 console = Console()
@@ -321,284 +322,132 @@ def show_trades(wallet: Optional[str], token: Optional[str], limit: int):
 @cli.command("start", help=CLI_DESC_START)
 async def start():
     """Start the bot"""
-    global bot_running
-
-    # Setup dependencies early to get config for PID file path
     if not setup_dependencies():
         return
 
-    pid_file = os.path.join(config.database_path, "bot.pid")
-
+    process_manager = ProcessManager(config.database_path)
+    
     # Check if already running
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file, "r") as f:
-                pid = int(f.read().strip())
-            import psutil
-            if psutil.pid_exists(pid) and any('main.py' in s and 'start' in s for s in psutil.Process(pid).cmdline()):
-                console.print(f"[bold yellow]Bot is already running with PID {pid}.[/bold yellow]")
-                return
-            else:
-                # Stale PID file
-                console.print("[bold yellow]Warning: Stale PID file found. Removing.[/bold yellow]")
-                os.remove(pid_file)
-        except Exception as e:
-            console.print(f"[bold red]Error checking existing PID file: {e}[/bold red]")
-            if os.path.exists(pid_file): os.remove(pid_file)
+    cli_status = process_manager.get_process_status("bot_cli")
+    if cli_status["running"]:
+        console.print("[bold yellow]Bot is already running.[/bold yellow]")
+        return
 
-    console.print("[bold green]Starting bot in background...[/bold green]")
-
-    # Daemonization logic
     try:
+        # Fork the process
         pid = os.fork()
-        if pid > 0: # Parent process
-            # Write PID file here in parent before it exits
-            os.makedirs(os.path.dirname(pid_file), exist_ok=True)
-            with open(pid_file, "w") as f:
-                f.write(str(pid))
-            console.print(f"[bold green]Bot process forked with PID {pid}. Parent exiting.[/bold green]")
-            sys.exit(0) # Exit the parent process
-    except OSError as e:
-        console.print(f"[bold red]Fork failed: {e}[/bold red]")
-        sys.exit(1)
-
-    # Daemonization step 2: Decouple from parent environment
-    os.setsid()
-
-    # Daemonization step 3: Redirect standard file descriptors
-    # It's often better to redirect to log files for debugging, but /dev/null for simplicity here
-    # If you want logging, you'll need to configure handlers here.
-    sys.stdout.flush()
-    sys.stderr.flush()
-    si = open(os.devnull, 'r')
-    so = open(os.devnull, 'a+')
-    se = open(os.devnull, 'a+')
-    os.dup2(si.fileno(), sys.stdin.fileno())
-    os.dup2(so.fileno(), sys.stdout.fileno())
-    os.dup2(se.fileno(), sys.stderr.fileno())
-
-    # Now we are in the detached child process. Re-setup dependencies as global state is lost.
-    # Note: Global state (like config, wallet_tracker) is not preserved across fork.
-    # We need to re-initialize everything here.
-    # However, setup_dependencies already handles this. We just need to ensure the globals are updated.
-    # setup_dependencies() # Not strictly needed here as the logic below implicitly uses the initialized objects.
-
-    # The actual bot logic that runs in the background process
-    bot_running = True # This global is now relevant for the daemon child process
-
-    if not setup_dependencies():
-        # If setup fails in the daemon child, log the error and exit
-        logger.error("Failed to setup dependencies in daemon process.")
-        sys.exit(1)
-
-    try:
-        wallets = wallet_tracker.get_tracked_wallets()
-
-        if not wallets:
-            logger.warning("Warning: No wallets are being tracked. Bot starting but idle.")
-
-        # Show startup information in logs (stdout redirected)
-        logger.info(f"Starting PumpFun Bot in {config.trading_mode.upper()} mode")
-        logger.info(f"Tracking {len(wallets)} wallets")
-        logger.info(f"Maximum SOL per trade: {config.max_sol_per_trade}")
-
-        if config.trading_mode == "real":
-            logger.warning(f"⚠️ WARNING: Running in REAL trading mode. Actual SOL will be used!")
-
-        # Start tracking wallets (this is the long-running part)
-        # Progress bar won't work in daemon mode, remove it or handle differently
-        # with Progress() as progress:
-        #     task = progress.add_task("[cyan]Starting wallet tracker...", total=1)
-
-        # Start wallet tracker with transaction callback
-        # transaction_callback will need to be safe for daemon (no console output ideally)
-        await wallet_tracker.start(transaction_callback)
-
-        # progress.update(task, advance=1)
-
-        logger.info("Bot started successfully! Daemon running.")
-
-        # Keep the bot running until interrupted (by stop command sending signal)
-        # The async event loop will keep this alive
-        # We don't need an explicit while True loop with asyncio.sleep(1)
-        # unless there's other periodic tasks. The wallet_tracker.start
-        # likely manages the main event loop tasks.
-
-        # The event loop is likely started by wallet_tracker.start or needs explicit running
-        # If wallet_tracker.start is a blocking call, this is fine.
-        # If it returns immediately and sets up tasks, we need to run the loop.
-        # Assuming wallet_tracker.start runs the loop or keeps tasks running.
-
-        # The existing KeyboardInterrupt handling is for foreground. Daemon stops via signal.
-        # The stop command sends SIGTERM, which will raise asyncio.CancelledError
-        # or similar, allowing clean shutdown if handled in wallet_tracker.stop or start.
-
-        # The clean up for PID file should be in a signal handler or a final cleanup block.
-        # Let's use atexit for cleanup on normal exit or signal.
-        import atexit
-        atexit.register(self._cleanup_pid_file, pid_file) # Pass pid_file to cleanup function
-
-        # The cleanup in the original try/finally block for KeyboardInterrupt
-        # is no longer needed for daemon mode, but keep it for potential foreground runs.
-        # We need a separate cleanup function registered with atexit.
-
+        if pid > 0:  # Parent process
+            process_manager.register_process("bot_cli", pid)
+            console.print(f"[bold green]Bot started in background (PID: {pid})[/bold green]")
+            return
+        else:  # Child process
+            # Decouple from parent
+            os.setsid()
+            
+            # Close file descriptors
+            os.close(0)
+            os.close(1)
+            os.close(2)
+            
+            # Start the bot
+            await wallet_tracker.start(transaction_callback)
+            
+            # Keep the process running
+            while True:
+                await asyncio.sleep(1)
+                
     except Exception as e:
-        logger.error(f"Error in daemon bot process: {e}", exc_info=True)
-        # Clean up PID file on unexpected errors too
-        if os.path.exists(pid_file):
-             os.remove(pid_file)
-        sys.exit(1)
-
-# Add this helper function within the cli.py file, outside of any class or command function
-def _cleanup_pid_file(pid_file):
-    """Helper function to remove PID file on exit"""
-    if os.path.exists(pid_file):
-        try:
-            os.remove(pid_file)
-            logger.info(f"Removed PID file: {pid_file}")
-        except Exception as e:
-            logger.error(f"Error removing PID file {pid_file}: {e}")
+        console.print(f"[bold red]Error starting bot: {e}[/bold red]")
 
 
 @cli.command("stop", help=CLI_DESC_STOP)
-async def stop():
-    """Stop the bot"""
-    # Setup dependencies needed for accessing config and data directory
+def stop():
+    """Stop the bot and web interface"""
     if not setup_dependencies():
         return
 
-    pid_file = os.path.join(config.database_path, "bot.pid")
+    process_manager = ProcessManager(config.database_path)
+    
+    # Stop CLI process
+    cli_status = process_manager.get_process_status("bot_cli")
+    if cli_status["running"]:
+        if process_manager.stop_process("bot_cli"):
+            console.print("[bold green]Bot stopped successfully.[/bold green]")
+        else:
+            console.print("[bold red]Failed to stop bot.[/bold red]")
+    else:
+        console.print("[bold yellow]Bot is not running.[/bold yellow]")
 
-    if not os.path.exists(pid_file):
-        console.print("[bold yellow]Bot is not running (PID file not found).[/bold yellow]")
-        return
-
-    try:
-        with open(pid_file, "r") as f:
-            daemon_pid = int(f.read().strip())
-
-        import psutil
-        if psutil.pid_exists(daemon_pid):
-            try:
-                p = psutil.Process(daemon_pid)
-                 # Add a check to make sure we are killing our bot process
-                if any('main.py' in s and 'start' in s and '--daemon' in s for s in p.cmdline()):
-
-                    console.print(f"[bold yellow]Stopping bot process with PID {daemon_pid}...[/bold yellow]")
-
-                    # Send termination signal (SIGTERM)
-                    p.terminate()
-
-                    # Wait a bit for it to terminate gracefully
-                    try:
-                        p.wait(timeout=5)
-                        console.print("[bold green]Bot stopped.[/bold green]")
-                    except psutil.TimeoutExpired:
-                        console.print("[bold yellow]Bot did not terminate gracefully, sending SIGKILL...[/bold yellow]")
-                        p.kill()
-                        console.print("[bold green]Bot stopped (killed).[/bold green]")
-
-                    # Remove PID file after successful termination
-                    if os.path.exists(pid_file):
-                         os.remove(pid_file)
-
-                else:
-                    console.print(f"[bold yellow]Warning: PID file found ({pid_file}) points to a non-bot process (PID {daemon_pid}). Not stopping. Removing stale PID file.[/bold yellow]")
-                    os.remove(pid_file)
-
-            except psutil.NoSuchProcess:
-                console.print(f"[bold yellow]Bot process with PID {daemon_pid} not found. Removing stale PID file.[/bold yellow]")
-                if os.path.exists(pid_file):
-                     os.remove(pid_file)
-            except Exception as e:
-                 console.print(f"[bold red]Error stopping bot process with PID {daemon_pid}: {e}[/bold red]")
-
-
-    except Exception as e:
-        console.print(f"[bold red]Error reading PID file: {e}[/bold red]")
+    # Stop web process
+    web_status = process_manager.get_process_status("bot_web")
+    if web_status["running"]:
+        if process_manager.stop_process("bot_web"):
+            console.print("[bold green]Web interface stopped successfully.[/bold green]")
+        else:
+            console.print("[bold red]Failed to stop web interface.[/bold red]")
+    else:
+        console.print("[bold yellow]Web interface is not running.[/bold yellow]")
 
 
 @cli.command("status", help=CLI_DESC_STATUS)
 def status():
     """Show bot status"""
-    # Setup dependencies needed for accessing config and data directory
     if not setup_dependencies():
         return
 
-    pid_file = os.path.join(config.database_path, "bot.pid")
-    is_daemon_running = False
-    daemon_pid = None
+    process_manager = ProcessManager(config.database_path)
+    
+    # Get status for both CLI and web processes
+    cli_status = process_manager.get_process_status("bot_cli")
+    web_status = process_manager.get_process_status("bot_web")
 
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file, "r") as f:
-                daemon_pid = int(f.read().strip())
+    # Create status table
+    table = Table(title="PredatorBot Status")
+    table.add_column("Component", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("PID", style="blue")
+    table.add_column("CPU %", style="yellow")
+    table.add_column("Memory %", style="magenta")
+    table.add_column("Uptime", style="white")
 
-            # Check if the process with this PID is running
-            # This is a basic check and might not work perfectly on all systems
-            import psutil
-            if psutil.pid_exists(daemon_pid):
-                 # Check if the process name looks like our bot
-                 try:
-                     p = psutil.Process(daemon_pid)
-                     # Check if command line contains 'main.py start'
-                     if any('main.py' in s and 'start' in s for s in p.cmdline()):
-                         is_daemon_running = True
-                     else:
-                          # PID file exists, but it's not our bot process
-                          console.print(f"[bold yellow]Warning: Stale PID file found ({pid_file}) pointing to a non-bot process. Removing.[/bold yellow]")
-                          os.remove(pid_file)
-                          daemon_pid = None # Clear stale PID
-                 except psutil.NoSuchProcess:
-                     is_daemon_running = False # Process died between check and access
-                 except Exception as e:
-                      console.print(f"[bold red]Error checking process details for PID {daemon_pid}: {e}[/bold red]")
-                      is_daemon_running = False
+    # Add CLI status
+    cli_row = ["Bot CLI"]
+    if cli_status["running"]:
+        uptime = datetime.now().timestamp() - cli_status["created"]
+        cli_row.extend([
+            "[green]Running[/green]",
+            str(cli_status["pid"]),
+            f"{cli_status['cpu_percent']:.1f}%",
+            f"{cli_status['memory_percent']:.1f}%",
+            f"{int(uptime/3600)}h {int((uptime%3600)/60)}m"
+        ])
+    else:
+        cli_row.extend(["[red]Stopped[/red]", "-", "-", "-", "-"])
+    table.add_row(*cli_row)
 
-            else:
-                # PID file exists, but process is not running (stale PID)
-                console.print(f"[bold yellow]Warning: Stale PID file found ({pid_file}). Removing.[/bold yellow]")
-                os.remove(pid_file)
-                daemon_pid = None # Clear stale PID
+    # Add Web status
+    web_row = ["Web Interface"]
+    if web_status["running"]:
+        uptime = datetime.now().timestamp() - web_status["created"]
+        web_row.extend([
+            "[green]Running[/green]",
+            str(web_status["pid"]),
+            f"{web_status['cpu_percent']:.1f}%",
+            f"{web_status['memory_percent']:.1f}%",
+            f"{int(uptime/3600)}h {int((uptime%3600)/60)}m"
+        ])
+    else:
+        web_row.extend(["[red]Stopped[/red]", "-", "-", "-", "-"])
+    table.add_row(*web_row)
 
-        except Exception as e:
-            console.print(f"[bold red]Error reading or processing PID file: {e}[/bold red]")
-            daemon_pid = None
+    console.print(table)
 
-    try:
-        # Determine overall running status
-        # The bot_running global is only true if running in the foreground in this terminal
-        # If daemon is running, we rely on the PID file check
-        overall_running_status = is_daemon_running # Assuming foreground run isn't typical when daemon exists
-
-        wallets = wallet_tracker.get_tracked_wallets() if wallet_tracker else []
-
-        # Create status panel
-        status_text = f"""[bold white]Running:[/bold white] {'Yes (PID: {daemon_pid})' if is_daemon_running else 'No'}
-[bold white]Trading Mode:[/bold white] {config.trading_mode.upper() if config else 'N/A'}
-[bold white]Tracked Wallets:[/bold white] {len(wallets)}
-[bold white]Max SOL per Trade:[/bold white] {config.max_sol_per_trade if config else 'N/A'}
-[bold white]Web Interface:[/bold white] {'Running' if web_server_process else 'Not running'}"""
-
-        status_panel = Panel(
-            status_text,
-            title="Bot Status",
-            border_style="green" if overall_running_status else "yellow"
-        )
-        console.print(status_panel)
-
-        # If bot is running (either foreground or daemon), show more details
-        if overall_running_status:
-            # Note: Accessing trade_store directly might only work in the foreground process
-            # For daemon, you'd need a separate mechanism (e.g., API call) to get live trades
-            console.print("[bold yellow]Note: Live trade data in status command is only available when running in the foreground.[/bold yellow]")
-            # The existing code to show recent trades below this will only work
-            # if the script is NOT run as a daemon process and bot_running is True
-            pass # We won't try to show live trades here for the daemon case
-
-
-    except Exception as e:
-        console.print(f"[bold red]Error showing status: {e}[/bold red]")
+    # Show additional info
+    if cli_status["running"]:
+        wallets = wallet_tracker.get_tracked_wallets()
+        console.print(f"\n[bold]Trading Mode:[/bold] {config.trading_mode.upper()}")
+        console.print(f"[bold]Tracked Wallets:[/bold] {len(wallets)}")
+        console.print(f"[bold]Max SOL per Trade:[/bold] {config.max_sol_per_trade}")
 
 
 @cli.command("web", help=CLI_DESC_WEB)
@@ -606,33 +455,38 @@ def status():
 @click.option("--port", default=5000, type=int, help="Port to bind the server to")
 def web(host: str, port: int):
     """Start the web interface"""
-    global web_server_process
-    
-    if web_server_process:
-        console.print("[bold yellow]Web interface is already running.[/bold yellow]")
-        return
-        
     if not setup_dependencies():
         return
+
+    process_manager = ProcessManager(config.database_path)
     
+    # Check if already running
+    web_status = process_manager.get_process_status("bot_web")
+    if web_status["running"]:
+        console.print("[bold yellow]Web interface is already running.[/bold yellow]")
+        return
+
     try:
-        console.print(f"[bold green]Starting web interface on http://{host}:{port}[/bold green]")
-        
-        web_server_process = start_web_server(host, port, config, trade_store)
-        
-        console.print(f"[bold green]Web interface started. Press Ctrl+C to stop.[/bold green]")
-        
-        try:
-            # Keep the process running until interrupted
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            console.print("\n[bold yellow]Stopping web interface...[/bold yellow]")
-            if web_server_process:
-                web_server_process.terminate()
-                web_server_process = None
-            console.print("[bold green]Web interface stopped.[/bold green]")
-        
+        # Fork the process
+        pid = os.fork()
+        if pid > 0:  # Parent process
+            process_manager.register_process("bot_web", pid)
+            console.print(f"[bold green]Web interface started in background (PID: {pid})[/bold green]")
+            console.print(f"Access the dashboard at http://{host}:{port}")
+            return
+        else:  # Child process
+            # Decouple from parent
+            os.setsid()
+            
+            # Close file descriptors
+            os.close(0)
+            os.close(1)
+            os.close(2)
+            
+            # Start the web server
+            from .web.server import app
+            app.run(host=host, port=port)
+            
     except Exception as e:
         console.print(f"[bold red]Error starting web interface: {e}[/bold red]")
         
@@ -648,4 +502,4 @@ def main():
 
 if __name__ == "__main__":
     # Run the CLI
-    main() 
+    main()
